@@ -1,8 +1,8 @@
-# <img src="img/icon.png" alt="BPDneo logo" height="64"> BPDneo-CXR
+# <img src="https://raw.githubusercontent.com/phflot/bpdneo-cxr-ui/77d3e0839be2403be5cbf37b72f4f4b12f9a5ed8/img/icon.png" alt="BPDneo logo" height="64"> BPDneo-CXR
 
 Site-Level Fine-Tuning with Progressive Layer Freezing for Bronchopulmonary Dysplasia Prediction from Day-1 Chest Radiographs in Extremely Preterm Infants.
 
-![Abstract](img/abstract.png)
+![Abstract](https://raw.githubusercontent.com/phflot/bpdneo-cxr-ui/77d3e0839be2403be5cbf37b72f4f4b12f9a5ed8/img/abstract.png)
 
 ## Overview
 
