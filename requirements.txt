@@ -12,3 +12,4 @@ numpy
 scikit-image
 scikit-learn
 tqdm
+PySide6

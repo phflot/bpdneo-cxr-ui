@@ -212,7 +212,7 @@ def _build_model_from_config(config: Dict[str, Any]) -> torch.nn.Module:
     """
     import torchxrayvision as xrv
     from torchvision import models as tvm
-    from bpd_torch.models.model import BPDModel
+    from bpd_ui.models.model import BPDModel
 
     if config["backbone"] == "xrv":
         base = xrv.models.ResNet(weights="resnet50-res512-all")
@@ -358,5 +358,5 @@ if __name__ == "__main__":
 
     print("\n" + "-" * 50)
     print("\nTo download and use a model:")
-    print(">>> from bpd_torch.models.model_util import load_pretrained_model")
+    print(">>> from bpd_ui.models.model_util import load_pretrained_model")
     print(">>> model = load_pretrained_model('bpd_xrv_progfreeze_lp_cutmix')")
