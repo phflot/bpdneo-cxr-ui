@@ -16,7 +16,6 @@ if src_path.exists():
 
 from PySide6.QtWidgets import QApplication  # noqa: E402
 from bpd_ui.ui.main_window import MainWindow  # noqa: E402
-from bpd_ui.ui.single_eval_tab import SingleEvalTab  # noqa: E402
 
 
 def main():
@@ -38,10 +37,6 @@ def main():
 
     # Create main window
     window = MainWindow()
-
-    # Create and set single evaluation tab
-    single_eval_tab = SingleEvalTab()
-    window.set_single_eval_tab(single_eval_tab)
 
     # Show window
     window.show()
