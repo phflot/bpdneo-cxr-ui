@@ -1,86 +1,64 @@
-# <img src="https://raw.githubusercontent.com/phflot/bpdneo-cxr-ui/77d3e0839be2403be5cbf37b72f4f4b12f9a5ed8/img/icon.png" alt="BPDneo logo" height="64"> BPDneo-CXR
+# <img src="https://raw.githubusercontent.com/phflot/bpdneo-cxr-ui/77d3e0839be2403be5cbf37b72f4f4b12f9a5ed8/img/icon.png" alt="BPDneo logo" height="64"> BPDneo‑CXR UI
 
-Site-Level Fine-Tuning with Progressive Layer Freezing for Bronchopulmonary Dysplasia Prediction from Day-1 Chest Radiographs in Extremely Preterm Infants.
+**Graphical user interface and batch tools for evaluating BPDneo chest‑X‑ray models.**
+The app enables non‑expert users to prepare datasets with guided ROI steps and to run reproducible, CPU‑only inference on single images or entire patient cohorts.
 
 ![Abstract](https://raw.githubusercontent.com/phflot/bpdneo-cxr-ui/77d3e0839be2403be5cbf37b72f4f4b12f9a5ed8/img/abstract.png)
 
-## Overview
+> **Model output** is binary as defined by the current checkpoints: probability of **Moderate/Severe BPD** vs **No/Mild BPD**. The UI records four‑grade operator labels during preprocessing for downstream use.
 
-Deep learning approach for early prediction of bronchopulmonary dysplasia (BPD) in extremely low birth weight infants using chest X-rays obtained within 24 hours of birth. Achieves AUROC of 0.78 using domain-specific pretraining with progressive layer freezing on a dataset of 163 patients.
+## Why this UI
 
-## Key Features
+- **Stepwise, "no‑wrong‑moves" preprocessing.** Seed‑first ROI extraction with optional border points, explicit grade entry, and manifest‑only persistence.
+- **Deterministic inference.** The app calls the exact transforms and loaders used by the research code (TorchXRayVision or ImageNet pipelines), so results match the reference examples.
+- **Portable.** CPU‑only, PyInstaller bundles (Win/macOS) and a Docker CLI for batch runs.
 
-- **Early prediction**: BPD risk assessment from day-1 radiographs
-- **Domain-specific pretraining**: TorchXRayVision backbone outperforms ImageNet
-- **Small dataset optimization**: Progressive layer freezing prevents overfitting
-- **Site-level deployment**: Computationally lightweight for local implementation
+## Modes
 
-## Installation
+1. **Preprocessing**
+   - Select root directory and a patient ID (dropdown, free text, or random ID).
+   - Import DICOM/PNG/JPG images.
+   - Extract ROI with **seed points** (mandatory) and **border points** (optional).
+   - Assign grade: `no_bpd`, `mild`, `moderate`, `severe`.
+   - Save: writes `prepared/<patient_id>/images/`, `prepared/<patient_id>/masks/`, and `prepared/manifest.xlsx`.
 
-```bash
-conda create --name bpdneo python=3.10
-conda activate bpdneo
-pip install -r requirements.txt
+2. **Dataset Evaluation**
+   - Read `prepared/manifest.xlsx`, filter rows with ROI.
+   - For each image: apply the model's training‑consistent preprocessing, run inference, and write `predictions.csv`.
+   - Save basic metrics and plots (binary scope).
+   - Runs off‑thread with progress reporting.
+
+3. **Single Image Evaluation**
+   - Load one X‑ray (DICOM/PNG/JPG).
+   - Select a model from the built‑in registry.
+   - Run inference and view probability + binary label; export results.
+
+## Data layout
+
+```
+<root>/
+  prepared/
+    <patient_id>/
+      images/  # input copies
+      masks/   # ROI masks (png)
+  prepared/manifest.xlsx
 ```
 
-## Usage
+**Manifest columns:**
+`patient_id, random_id, image_relpath, roi_relpath, grade_label, preproc_json, eval_split, timestamp`
 
-### Ablation Study
+## Models and preprocessing
 
-The main ablation study evaluates different model configurations with various pretraining strategies and training techniques. It implements repeated 5-fold cross-validation to ensure robust performance estimates.
-
-```bash
-# Run full ablation study with all experiments
-python experiments/ablation_study.py \
-    --data-dir /path/to/bpd/data \
-    --output-dir ./results
-
-# Run specific experiments
-python experiments/ablation_study.py \
-    --data-dir /path/to/bpd/data \
-    --experiments lpft_progressive_xrv_mixup_lpnomix progressive_freezing_xrv \
-    --runs 6 \
-    --folds 5
-
-# Custom configuration
-python experiments/ablation_study.py \
-    --data-dir /path/to/bpd/data \
-    --image-dir img \
-    --labels-file labels.xlsx \
-    --batch-size 16 \
-    --num-workers 8 \
-    --device cuda
-```
-
-
-#### Available Experiments
-
-The ablation study includes multiple experiment configurations:
-
-**XRV Pretrained Models:**
-- `lpft_progressive_xrv_mixup_lpnomix`: Linear probe + progressive freezing with CutMix (best performing)
-- `lpft_progressive_xrv`: Linear probe + progressive freezing without augmentation
-- `progressive_freezing_xrv`: Progressive freezing only
-- `full_finetune_xrv`: Full fine-tuning without freezing
-
-**ImageNet Pretrained Models:**
-- `lpft_progressive_rgb`: Linear probe + progressive freezing (RGB)
-- `progressive_freezing_rgb`: Progressive freezing only (RGB)
-- `full_finetune_rgb`: Full fine-tuning without freezing (RGB)
-
-Results are saved as CSV files with detailed metrics including AUROC, F1 score, sensitivity, and specificity for each fold and run.
-
-## Dataset
-
-The study uses chest radiographs from 163 ELBW infants (≤32 weeks gestation, 401-999g) from the NeoVitaA trial. Images were acquired within 24 hours of birth as part of routine respiratory assessment.
-
-## Pre-trained Models
-
-We provide pre-trained models for BPD prediction, trained on the complete dataset. All models use ResNet-50 architecture with different initialization and training strategies.
+- Models are loaded by name from a registry and run in `eval()` mode.
+- Preprocessing strictly follows the model's training recipe:
+  - **XRV-backed models:** grayscale normalization → tensor → resize to 512×512.
+  - **ImageNet-backed models:** resize → RGB → tensor → ImageNet mean/std.
+- Inference: forward pass → `sigmoid` → probability of Moderate/Severe.
+- The Single‑image and Dataset modes both call the same code path.
 
 ### Available Models
 
-Models were trained on the complete dataset and AUROC was computed using repeated 5-fold cross-validation.
+Pre-trained models for BPD prediction. All models use ResNet-50 architecture with different initialization and training strategies. AUROC was computed using repeated 5-fold cross-validation.
 
 | Model | Description | AUROC | Download |
 |-------|-------------|-------|----------|
@@ -90,24 +68,42 @@ Models were trained on the complete dataset and AUROC was computed using repeate
 | **bpd_rgb_progfreeze** | ImageNet baseline with progressive freezing (for comparison) | 0.717 | [Download](https://cloud.hiz-saarland.de/public.php/dav/files/W7EmnFDSFwoFSBL) |
 
 
-### Quick Start
+## Install (development)
 
-```python
-from bpd_torch.models.model_util import load_pretrained_model
-
-# Load the best performing model
-model = load_pretrained_model("bpd_xrv_progfreeze_lp_cutmix")
-
-# Or download weights only
-from bpd_torch.models.model_util import download_model_weights
-weights_path = download_model_weights("bpd_xrv_progfreeze_lp_cutmix")
+```bash
+python -m venv .venv
+source .venv/bin/activate  # or .venv\Scripts\activate on Windows
+pip install -U pip
+pip install -e .
 ```
+
+Run the GUI:
+
+```bash
+python apps/gui_app.py
+```
+
+## Bundles and Docker
+
+- **PyInstaller bundles:** see GitHub Releases (Win and macOS). Double‑click to run.
+- **Docker (CLI only):**
+
+```bash
+docker run --rm -v "$PWD":/data ghcr.io/<owner>/bpdneo-cxr-ui:latest \
+  eval-dataset --root /data --model bpd_xrv_progfreeze_lp_cutmix
+```
+
+## Notes
+
+- This software is for research use. It is not a medical device.
+- Output is **binary** per current checkpoints (Moderate/Severe vs No/Mild).
 
 ## Citation
 
-If you use this code for your work, please cite:
+If you use this application or the associated models in research, please cite:
 
-> S. Goedicke-Fritz, M. Bous, A. Engel, M. Flotho, P. Hirsch, H. Wittig, D. Milanovic, D. Mohr, M. Kaspar, S. Nemat, D. Kerner, A. Bücker, A. Keller, S. Meyer, M. Zemlin, P. Flotho, "Site-Level Fine-Tuning with Progressive Layer Freezing: Towards Robust Prediction of Bronchopulmonary Dysplasia from Day-1 Chest Radiographs in Extremely Preterm Infants," arXiv preprint arXiv:2507.12269, 2025.
+> Goedicke‑Fritz S., Bous M., Engel A., Flotho M., Hirsch P., Wittig H., Milanovic D., Mohr D., Kaspar M., Nemat S., Kerner D., Bücker A., Keller A., Meyer S., Zemlin M., Flotho P.
+> *Site‑Level Fine‑Tuning with Progressive Layer Freezing: Towards Robust Prediction of Bronchopulmonary Dysplasia from Day‑1 Chest Radiographs in Extremely Preterm Infants.* arXiv:2507.12269 (2025).
 
 BibTeX entry:
 ```bibtex
