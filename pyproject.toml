@@ -1,0 +1,49 @@
+[project]
+name = "bpdneo-cxr-ui"
+version = "0.1.0"
+description = "Desktop GUI and CLI for early BPD prediction from chest X-rays"
+authors = [{name = "Philipp Flotho"}]
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+
+dependencies = [
+    "torchxrayvision",
+    "torchvision",
+    "pandas",
+    "requests",
+    "umap-learn",
+    "notebook",
+    "seaborn",
+    "openpyxl",
+    "torchmetrics",
+    "pillow",
+    "numpy",
+    "scikit-image",
+    "scikit-learn",
+    "tqdm",
+    "PySide6",
+    "pydicom",
+    "opencv-contrib-python",
+]
+
+[project.optional-dependencies]
+docs = [
+    "sphinx>=7.0",
+    "myst-parser>=4.0",
+    "sphinx-copybutton>=0.5",
+    "sphinx-design>=0.5",
+    "sphinxcontrib-bibtex>=2.6",
+    "pydata-sphinx-theme>=0.15",
+    "sphinx-autodoc-typehints>=2.0",
+]
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = {find = {where = ["src"]}}
+
+[tool.setuptools.package-data]
+bpd_ui = ["py.typed"]

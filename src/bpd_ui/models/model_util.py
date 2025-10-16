@@ -615,16 +615,19 @@ def get_preprocessing_transforms(model_name: str):
     Notes
     -----
     **XRV Preprocessing Pipeline**:
+
     1. Convert PIL Image to grayscale numpy array
     2. Apply xrv.datasets.normalize(arr, 255) - scales to [0, 1] range
     3. Convert to tensor (adds channel dimension)
     4. Resize to 512×512 with antialiasing
 
     **ImageNet Preprocessing Pipeline**:
+
     1. Resize to 512×512 with antialiasing
     2. Convert to RGB (if not already)
     3. Convert to tensor (scales to [0, 1])
     4. Normalize with ImageNet statistics:
+
        - mean=[0.485, 0.456, 0.406]
        - std=[0.229, 0.224, 0.225]
 
