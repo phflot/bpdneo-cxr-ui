@@ -7,6 +7,8 @@ The app enables non‑expert users to prepare datasets with guided ROI steps and
 
 > **Model output** is binary as defined by the current checkpoints: probability of **Moderate/Severe BPD** vs **No/Mild BPD**. The UI records four‑grade operator labels during preprocessing for downstream use.
 
+📖 **[Read the full documentation](https://bpdneo-cxr-ui.readthedocs.io/en/latest/)**
+
 ## Why this UI
 
 - **Stepwise, "no‑wrong‑moves" preprocessing.** Seed‑first ROI extraction with optional border points, explicit grade entry, and manifest‑only persistence.
