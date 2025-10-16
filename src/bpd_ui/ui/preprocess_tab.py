@@ -12,9 +12,11 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QGroupBox,
     QComboBox,
-    QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QLineEdit,
+    QDialog,
+    QDialogButtonBox,
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QPixmap, QImage
@@ -37,6 +39,7 @@ class PreprocessTab(QWidget):
         self.display_pix = None
         self.current_pil = None
         self.current_path = None
+        self._rectified = False
         self._build()
 
     def _build(self):
@@ -58,12 +61,14 @@ class PreprocessTab(QWidget):
 
         g2 = QGroupBox("Patient")
         h2 = QHBoxLayout()
-        self.pid_edit = QLineEdit()
-        rb = QPushButton("Random")
-        rb.clicked.connect(self._random_pid)
+        self.pid_combo = QComboBox()
+        self.pid_combo.setEditable(True)
+        self.pid_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        add_btn = QPushButton("Add")
+        add_btn.clicked.connect(self._add_patient_id)
         h2.addWidget(QLabel("ID:"))
-        h2.addWidget(self.pid_edit, 1)
-        h2.addWidget(rb)
+        h2.addWidget(self.pid_combo, 1)
+        h2.addWidget(add_btn)
         g2.setLayout(h2)
         R.addWidget(g2)
 
@@ -71,9 +76,14 @@ class PreprocessTab(QWidget):
         v3 = QVBoxLayout()
         self.listw = QListWidget()
         v3.addWidget(self.listw)
-        addb = QPushButton("Add Images…")
-        addb.clicked.connect(self._add_files)
-        v3.addWidget(addb)
+        h3 = QHBoxLayout()
+        folder_btn = QPushButton("Choose Folder…")
+        folder_btn.clicked.connect(self._choose_folder)
+        add_btn = QPushButton("Add Images…")
+        add_btn.clicked.connect(self._add_files)
+        h3.addWidget(folder_btn)
+        h3.addWidget(add_btn)
+        v3.addLayout(h3)
         g3.setLayout(v3)
         R.addWidget(g3, 1)
 
@@ -121,11 +131,85 @@ class PreprocessTab(QWidget):
         if d:
             self.root = Path(d)
             self.root_lbl.setText(d)
+            self._load_existing_patient_ids()
 
-    def _random_pid(self):
-        import uuid
+    def _load_existing_patient_ids(self):
+        if not self.root:
+            return
+        manifest_path = self.root / "prepared" / "manifest.xlsx"
+        if manifest_path.exists():
+            try:
+                from bpd_ui.core.state import read_manifest
 
-        self.pid_edit.setText(uuid.uuid4().hex[:8])
+                df = read_manifest(self.root)
+                if "patient_id" in df.columns:
+                    existing_ids = df["patient_id"].unique().tolist()
+                    existing_ids.sort()
+                    self.pid_combo.clear()
+                    self.pid_combo.addItems([str(pid) for pid in existing_ids])
+            except Exception:
+                pass
+
+    def _get_next_numeric_id(self):
+        max_id = 0
+        for i in range(self.pid_combo.count()):
+            pid = self.pid_combo.itemText(i)
+            try:
+                num = int(pid)
+                max_id = max(max_id, num)
+            except ValueError:
+                continue
+        return str(max_id + 1)
+
+    def _add_patient_id(self):
+        next_id = self._get_next_numeric_id()
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Add Patient ID")
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel("Patient ID:"))
+        id_edit = QLineEdit(next_id)
+        layout.addWidget(id_edit)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            new_id = id_edit.text().strip()
+            if new_id:
+                idx = self.pid_combo.findText(new_id)
+                if idx == -1:
+                    self.pid_combo.addItem(new_id)
+                    self.pid_combo.setCurrentText(new_id)
+                else:
+                    self.pid_combo.setCurrentIndex(idx)
+
+    def _choose_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Image Folder")
+        if not folder:
+            return
+        folder_path = Path(folder)
+        image_extensions = {".png", ".jpg", ".jpeg", ".dcm"}
+        image_files = []
+        for ext in image_extensions:
+            image_files.extend(folder_path.glob(f"*{ext}"))
+            image_files.extend(folder_path.glob(f"*{ext.upper()}"))
+
+        image_files = sorted(set(image_files))
+
+        if not image_files:
+            return
+
+        self.listw.clear()
+        for f in image_files:
+            it = QListWidgetItem(f.name)
+            it.setData(Qt.ItemDataRole.UserRole, str(f))
+            self.listw.addItem(it)
+
+        if self.listw.count() > 0:
+            self.listw.setCurrentRow(0)
 
     def _add_files(self):
         files, _ = QFileDialog.getOpenFileNames(
@@ -147,7 +231,7 @@ class PreprocessTab(QWidget):
         p = self.listw.item(i).data(Qt.ItemDataRole.UserRole)
         self.current_path = Path(p)
         disp = load_image_for_display(p)
-        disp = self._rectify_if_needed(disp, p)
+        disp, self._rectified = self._rectify_if_needed(disp, p)
         self.current_pil = disp
         arr = np.array(disp)
         h, w, c = arr.shape
@@ -158,13 +242,15 @@ class PreprocessTab(QWidget):
         self.mask_np = None
 
     def _rectify_if_needed(self, pil_img, path):
+        changed = False
         if str(path).lower().endswith((".png", ".jpg", ".jpeg")):
             import cv2
 
             bgr = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
             warp = rectify_if_scan(bgr)
-            return Image.fromarray(cv2.cvtColor(warp, cv2.COLOR_BGR2RGB))
-        return pil_img
+            changed = warp is not bgr and warp.shape != bgr.shape
+            return Image.fromarray(cv2.cvtColor(warp, cv2.COLOR_BGR2RGB)), changed
+        return pil_img, False
 
     def _auto(self):
         if self.idx < 0 or self.current_pil is None:
@@ -232,12 +318,12 @@ class PreprocessTab(QWidget):
             not self.root
             or self.idx < 0
             or self.mask_np is None
-            or not self.pid_edit.text()
+            or not self.pid_combo.currentText().strip()
             or self.current_pil is None
             or self.current_path is None
         ):
             return
-        pid = self.pid_edit.text()
+        pid = self.pid_combo.currentText().strip()
         p = self.current_path
         img_name = p.name
         mask_name = p.stem + ".png"
@@ -254,7 +340,15 @@ class PreprocessTab(QWidget):
 
         Image.fromarray(self.mask_np).save(mask_dst)
 
-        preproc = {"rectified": not is_dcm}
+        roi_method = "auto"
+        if self.canvas.seeds_img or self.canvas.border_img:
+            roi_method = "auto+refine"
+        preproc = {
+            "rectified": bool(self._rectified),
+            "roi": roi_method,
+            "seeds": len(self.canvas.seeds_img),
+            "border_pts": len(self.canvas.border_img),
+        }
         row = {
             "patient_id": pid,
             "random_id": "",

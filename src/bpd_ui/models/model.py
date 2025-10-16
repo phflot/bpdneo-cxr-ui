@@ -10,11 +10,58 @@ from typing import List
 
 
 class BPDModel(nn.Module):
-    """Wrap either a TorchXRayVision ``ResNet`` or a torchvision ``ResNet``.
+    """
+    Unified wrapper for BPD prediction models with binary classification head.
 
-    * Detects backend at runtime and exposes the raw torchvision model at
-      ``self.inner_model`` so later code can address layers uniformly.
-    * ``compile()`` builds an optimiser and optionally freezes the backbone.
+    This class wraps either a TorchXRayVision ResNet or a torchvision ResNet
+    and provides a unified interface for training and inference. It automatically
+    detects the backend type and exposes the underlying torchvision model for
+    uniform layer access.
+
+    The wrapper replaces the original fully-connected layer with a binary
+    classification head (single output unit) and provides configurable optimizer
+    setup with support for progressive unfreezing.
+
+    Parameters
+    ----------
+    base_model : nn.Module
+        Base ResNet model, either from torchxrayvision.models or torchvision.models.
+        The final classification layer will be replaced.
+
+    Attributes
+    ----------
+    base_model : nn.Module
+        The original model passed during initialization
+    inner_model : nn.Module
+        The actual torchvision ResNet (unwrapped from XRV if needed)
+    is_xrv : bool
+        True if base_model is from TorchXRayVision, False for torchvision
+    dropout : nn.Dropout
+        Dropout layer (p=0.1) applied before final classification
+    fc : nn.Linear
+        Binary classification head (features → 1 logit)
+
+    Examples
+    --------
+    >>> import torchxrayvision as xrv
+    >>> from bpd_ui.models import BPDModel
+    >>>
+    >>> # Create model with XRV backbone
+    >>> xrv_base = xrv.models.ResNet(weights="resnet50-res512-all")
+    >>> model = BPDModel(xrv_base)
+    >>>
+    >>> # Configure optimizer with frozen backbone
+    >>> model.compile(freeze_backbone=True, lr_head=5e-4)
+    >>>
+    >>> # Inference
+    >>> import torch
+    >>> x = torch.randn(1, 1, 512, 512)
+    >>> logits = model(x)
+    >>> prob = torch.sigmoid(logits)
+
+    See Also
+    --------
+    bpd_ui.models.model_util.load_pretrained_model : Load pretrained weights
     """
 
     def __init__(self, base_model: nn.Module):
@@ -50,7 +97,19 @@ class BPDModel(nn.Module):
         return self.fc(feats)
 
     def get_resolution(self) -> int:
-        """Return default training resolution (used by augmentor)."""
+        """
+        Get the default training resolution for this model.
+
+        Returns
+        -------
+        int
+            Training resolution in pixels (always 512 for BPD models)
+
+        Notes
+        -----
+        All BPD models were trained with 512×512 input images. This method
+        is used by data augmentation pipelines to ensure consistent preprocessing.
+        """
         return 512
 
     # ------------------------------------------------------------------
@@ -65,12 +124,59 @@ class BPDModel(nn.Module):
         wd_backbone: float = 1e-4,
         wd_head: float = 1e-5,
     ) -> None:
-        """Build an AdamW optimiser and (optionally) freeze the backbone.
+        """
+        Build an AdamW optimizer with configurable backbone freezing.
 
-        *When ``freeze_backbone`` is ``True`` the backbone starts frozen –
-        only the head learns.  Layers **remain present** in the optimiser so
-        that they can be unfrozen later without touching the optimiser / LR
-        scheduler.*
+        This method creates an optimizer with separate parameter groups for the
+        classification head and backbone layers. When freeze_backbone is True,
+        backbone parameters are frozen but remain in the optimizer, enabling
+        later unfreezing without recreating the optimizer or learning rate scheduler.
+
+        Parameters
+        ----------
+        freeze_backbone : bool, default=True
+            If True, freeze all backbone parameters (only head learns).
+            If False, full fine-tuning of all layers.
+        lr_backbone : float, default=1e-4
+            Learning rate for backbone layers (layer3, layer4)
+        lr_head : float, default=5e-4
+            Learning rate for the classification head
+        wd_backbone : float, default=1e-4
+            Weight decay for backbone parameters
+        wd_head : float, default=1e-5
+            Weight decay for head parameters
+
+        Notes
+        -----
+        When freeze_backbone=True, this method:
+        1. Sets requires_grad=False for all backbone parameters
+        2. Creates parameter groups for layer3, layer4, and head
+        3. Frozen layers remain in optimizer for later unfreezing
+
+        Progressive unfreezing workflow:
+        1. Call compile(freeze_backbone=True)
+        2. Train for N epochs
+        3. Call model.unfreeze_layers(model.inner_model.layer4)
+        4. Continue training (optimizer already has layer4 params)
+
+        Examples
+        --------
+        >>> model = BPDModel(base_model)
+        >>>
+        >>> # Progressive freezing training
+        >>> model.compile(freeze_backbone=True, lr_head=5e-4)
+        >>> optimizer = model.get_optimizer()
+        >>>
+        >>> # After linear probing, unfreeze layer4
+        >>> model.unfreeze_layers(model.inner_model.layer4)
+        >>>
+        >>> # Continue training with same optimizer
+        >>> # (layer4 params already present with lr_backbone rate)
+
+        See Also
+        --------
+        unfreeze_layers : Unfreeze specific layers during training
+        get_optimizer : Retrieve the configured optimizer
         """
         # ── freeze / unfreeze tensors ------------------------------------
         for p in self.inner_model.parameters():
@@ -114,19 +220,96 @@ class BPDModel(nn.Module):
     # helpers
     # ------------------------------------------------------------------
     def load_model(self, filepath: str) -> None:
+        """
+        Load model weights and optimizer state from a checkpoint file.
+
+        Parameters
+        ----------
+        filepath : str
+            Path to the checkpoint file (.pth)
+
+        Notes
+        -----
+        The checkpoint file is expected to contain a dictionary with:
+        - 'model_state_dict': Model parameters
+        - 'optimizer_state_dict' (optional): Optimizer state
+
+        If an optimizer has been configured via compile() and the checkpoint
+        contains optimizer state, it will be restored.
+
+        Examples
+        --------
+        >>> model = BPDModel(base_model)
+        >>> model.compile(freeze_backbone=True)
+        >>> model.load_model("checkpoint_epoch_10.pth")
+        """
         ckpt = torch.load(filepath, map_location=torch.device("cpu"))
         self.load_state_dict(ckpt["model_state_dict"])
         if "optimizer_state_dict" in ckpt and self._optimizer is not None:
             self._optimizer.load_state_dict(ckpt["optimizer_state_dict"])
 
     def get_optimizer(self) -> optim.Optimizer:
+        """
+        Retrieve the configured optimizer.
+
+        Returns
+        -------
+        optim.Optimizer
+            The AdamW optimizer created by compile()
+
+        Raises
+        ------
+        RuntimeError
+            If compile() has not been called yet
+
+        Examples
+        --------
+        >>> model = BPDModel(base_model)
+        >>> model.compile(freeze_backbone=True)
+        >>> optimizer = model.get_optimizer()
+        >>> for epoch in range(10):
+        ...     optimizer.zero_grad()
+        ...     # training loop
+        """
         if self._optimizer is None:
             raise RuntimeError("compile() must be called before get_optimizer()")
         return self._optimizer
 
     # Optionally expose an easy unfreeze utility -------------------------
     def unfreeze_layers(self, *layers: nn.Sequential) -> None:
-        """Set ``requires_grad = True`` for all params in *layers*."""
+        """
+        Unfreeze specified layers by setting requires_grad=True.
+
+        This method enables progressive unfreezing during training. Layers must
+        already be present in the optimizer (via compile() parameter groups) for
+        gradients to be applied.
+
+        Parameters
+        ----------
+        *layers : nn.Sequential
+            One or more layer modules to unfreeze (e.g., model.inner_model.layer4)
+
+        Examples
+        --------
+        >>> model = BPDModel(base_model)
+        >>> model.compile(freeze_backbone=True)
+        >>>
+        >>> # Train with frozen backbone for 5 epochs
+        >>> # ...
+        >>>
+        >>> # Unfreeze layer4 for fine-tuning
+        >>> model.unfreeze_layers(model.inner_model.layer4)
+        >>>
+        >>> # Continue training (layer4 grads now active)
+        >>> # ...
+        >>>
+        >>> # Optionally unfreeze layer3 later
+        >>> model.unfreeze_layers(model.inner_model.layer3)
+
+        See Also
+        --------
+        compile : Configure optimizer with parameter groups
+        """
         for layer in layers:
             for p in layer.parameters():
                 p.requires_grad = True
@@ -138,6 +321,32 @@ class BPDModel(nn.Module):
 
 
 def init_weights(m: nn.Module) -> None:
+    """
+    Initialize weights for linear layers using Xavier uniform initialization.
+
+    This function is applied to the binary classification head (fc layer) during
+    BPDModel initialization to ensure proper weight initialization.
+
+    Parameters
+    ----------
+    m : nn.Module
+        Module to initialize (only linear layers are affected)
+
+    Notes
+    -----
+    - Linear layer weights: Xavier uniform initialization
+    - Linear layer biases: Constant fill with 0.01
+    - Other module types: No initialization applied
+
+    Xavier (Glorot) uniform initialization draws weights from a uniform
+    distribution with bounds calculated to maintain variance across layers.
+
+    Examples
+    --------
+    >>> import torch.nn as nn
+    >>> fc = nn.Linear(2048, 1)
+    >>> init_weights(fc)
+    """
     if isinstance(m, nn.Linear):
         init.xavier_uniform_(m.weight)
         if m.bias is not None:

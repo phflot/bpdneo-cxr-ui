@@ -1,5 +1,71 @@
 """
-Model utility functions for downloading and loading pre-trained BPD prediction models.
+Model Utilities for BPD Prediction
+===================================
+
+This module provides utilities for downloading, loading, and preprocessing
+pretrained BPD prediction models. It handles:
+
+- **Model registry**: Configuration database with AUROC metrics for all models
+- **Download management**: Automatic download from cloud storage with progress bars
+- **Checkpoint loading**: Robust deserialization with backwards compatibility
+- **Preprocessing transforms**: Training-consistent image preprocessing pipelines
+- **Model construction**: Automatic backbone selection and wrapper initialization
+
+Available Models
+----------------
+The MODEL_CONFIGS dictionary contains metadata for all available models:
+
+- bpd_xrv_progfreeze_lp_cutmix : Best model (AUROC 0.783)
+- bpd_xrv_progfreeze : Baseline (AUROC 0.775)
+- bpd_xrv_fullft : Full fine-tuning (AUROC 0.761)
+- bpd_rgb_progfreeze : ImageNet baseline (AUROC 0.717)
+
+Critical Implementation Details
+--------------------------------
+**Preprocessing consistency**: The get_preprocessing_transforms() function returns
+transforms that exactly match those used during training. Never use custom transforms.
+
+**XRV preprocessing**:
+1. Convert to grayscale
+2. Apply xrv.datasets.normalize(arr, 255)
+3. Convert to tensor
+4. Resize to 512×512
+
+**ImageNet preprocessing**:
+1. Resize to 512×512
+2. Convert to RGB
+3. ToTensor
+4. ImageNet normalization (mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+
+**Checkpoint compatibility**: The _load_checkpoint() function handles legacy
+checkpoints that reference __main__.ModelConfig, ensuring compatibility with
+older saved models.
+
+Examples
+--------
+>>> from bpd_ui.models.model_util import load_pretrained_model, get_preprocessing_transforms
+>>> from PIL import Image
+>>> import torch
+>>>
+>>> # List available models
+>>> from bpd_ui.models.model_util import list_available_models
+>>> models = list_available_models()
+>>> for name, info in models.items():
+...     print(f"{name}: AUROC {info['auroc']}")
+>>>
+>>> # Load model and transforms
+>>> model = load_pretrained_model("bpd_xrv_progfreeze_lp_cutmix")
+>>> transform = get_preprocessing_transforms("bpd_xrv_progfreeze_lp_cutmix")
+>>>
+>>> # Preprocess and predict
+>>> img = Image.open("xray.jpg")
+>>> tensor = transform(img).unsqueeze(0)
+>>> model.eval()
+>>> with torch.no_grad():
+...     logits = model(tensor)
+...     prob = torch.sigmoid(logits).item()
+>>>
+>>> print(f"P(Moderate/Severe BPD) = {prob:.4f}")
 """
 
 import torch
@@ -16,7 +82,41 @@ from dataclasses import dataclass
 
 
 def _load_checkpoint(model_path, device):
-    """Load checkpoint with proper handling of __main__.ModelConfig references."""
+    """
+    Load model checkpoint with backwards compatibility for legacy references.
+
+    This function handles checkpoints that may contain references to
+    __main__.ModelConfig, which occurs when models were saved from scripts
+    rather than modules. It attempts multiple loading strategies to ensure
+    maximum compatibility.
+
+    Parameters
+    ----------
+    model_path : str or Path
+        Path to the checkpoint file (.pth)
+    device : torch.device
+        Device to map tensors to during loading
+
+    Returns
+    -------
+    dict or torch.nn.Module
+        Loaded checkpoint (usually a dict with 'model_state_dict' key)
+
+    Notes
+    -----
+    Loading strategy (in order of attempt):
+    1. Try weights_only=True (safest, PyTorch 2.x+)
+    2. Try weights_only=True with __main__.ModelConfig stub registered
+    3. Fall back to weights_only=False (less safe but compatible)
+
+    The ModelConfig stub is a minimal class that allows unpickling without
+    requiring the actual implementation, since we only need tensor data.
+
+    Examples
+    --------
+    >>> checkpoint = _load_checkpoint("model.pth", torch.device("cpu"))
+    >>> state_dict = checkpoint['model_state_dict']
+    """
     # 1) Try safest path first
     try:
         return torch.load(model_path, map_location=device, weights_only=True)
@@ -46,7 +146,7 @@ def _load_checkpoint(model_path, device):
 
 @dataclass
 class ModelConfig:
-    """Configuration for a model - needed for unpickling saved checkpoints."""
+    """Model configuration dataclass for checkpoint serialization."""
 
     name: str
     display_name: str
@@ -114,15 +214,72 @@ MODEL_CONFIGS = {
 
 
 class ModelDownloader:
-    """Downloads pre-trained BPD prediction models."""
+    """
+    Downloads pre-trained BPD prediction models from cloud storage.
+
+    This class handles automatic downloading of pretrained model weights from
+    the HIZ Saarland cloud storage. It manages download progress, caching,
+    and configuration file persistence.
+
+    Parameters
+    ----------
+    model_name : str
+        Name of the model to download (must be a key in MODEL_CONFIGS)
+    save_dir : str, default="~/.bpdneo/models"
+        Directory path where models will be saved (supports ~ expansion)
+
+    Attributes
+    ----------
+    model_name : str
+        Name of the requested model
+    config : dict
+        Model configuration from MODEL_CONFIGS
+    save_dir : Path
+        Expanded absolute path to save directory
+    model_path : Path
+        Full path to the model weights file (.pth)
+    config_path : Path
+        Full path to the configuration JSON file
+    model_url : str
+        Download URL constructed from config file_id
+
+    Raises
+    ------
+    ValueError
+        If model_name is not found in MODEL_CONFIGS
+
+    Examples
+    --------
+    >>> from bpd_ui.models.model_util import ModelDownloader
+    >>> downloader = ModelDownloader("bpd_xrv_progfreeze_lp_cutmix")
+    >>> model_path = downloader.download_model()
+    >>> print(f"Model downloaded to: {model_path}")
+
+    See Also
+    --------
+    download_model_weights : Convenience function wrapper
+    load_pretrained_model : Load model after download
+
+    Notes
+    -----
+    The downloader automatically:
+    - Creates the save directory if it doesn't exist
+    - Saves a JSON config file alongside the weights
+    - Skips download if the model already exists
+    - Shows progress bar during download
+    - Removes partial downloads on failure
+    """
 
     def __init__(self, model_name: str, save_dir: str = "~/.bpdneo/models"):
         """
         Initialize the model downloader.
 
-        Args:
-            model_name: Name of the model to download (see MODEL_CONFIGS keys)
-            save_dir: Directory to save downloaded models
+        Parameters
+        ----------
+        model_name : str
+            Name of the model to download (see MODEL_CONFIGS keys)
+        save_dir : str, default="~/.bpdneo/models"
+            Directory to save downloaded models
         """
         if model_name not in MODEL_CONFIGS:
             available_models = ", ".join(MODEL_CONFIGS.keys())
@@ -144,8 +301,38 @@ class ModelDownloader:
         """
         Download the model weights if not already present.
 
-        Returns:
-            Path to the downloaded model weights
+        This method downloads the model weights from cloud storage, displays
+        download progress, and saves both the weights and configuration file.
+        If the model already exists locally, it skips the download.
+
+        Returns
+        -------
+        Path
+            Path to the model weights file (.pth)
+
+        Raises
+        ------
+        RuntimeError
+            If the download fails due to network errors or server issues
+
+        Notes
+        -----
+        Download process:
+        1. Create save directory if needed
+        2. Save configuration JSON
+        3. Check if model already exists (skip if yes)
+        4. Stream download with progress bar
+        5. Remove partial download on failure
+
+        The download uses streaming to handle large files efficiently and
+        displays a tqdm progress bar showing download speed and ETA.
+
+        Examples
+        --------
+        >>> downloader = ModelDownloader("bpd_xrv_progfreeze_lp_cutmix")
+        >>> path = downloader.download_model()
+        Model 'bpd_xrv_progfreeze_lp_cutmix' already exists at ...
+        >>> print(path)
         """
         self.save_dir.mkdir(parents=True, exist_ok=True)
 
@@ -193,14 +380,34 @@ class ModelDownloader:
 
 def download_model_weights(model_name: str, save_dir: str = "~/.bpdneo/models") -> Path:
     """
-    Download pre-trained model weights.
+    Download pre-trained model weights (convenience wrapper).
 
-    Args:
-        model_name: Name of the model to download
-        save_dir: Directory to save the model
+    This is a convenience function that creates a ModelDownloader instance
+    and downloads the specified model. It's the recommended way to download
+    models if you don't need to access downloader internals.
 
-    Returns:
-        Path to the downloaded model weights
+    Parameters
+    ----------
+    model_name : str
+        Name of the model to download (must be in MODEL_CONFIGS)
+    save_dir : str, default="~/.bpdneo/models"
+        Directory to save the model (supports ~ expansion)
+
+    Returns
+    -------
+    Path
+        Path to the downloaded model weights file
+
+    Examples
+    --------
+    >>> from bpd_ui.models.model_util import download_model_weights
+    >>> path = download_model_weights("bpd_xrv_progfreeze_lp_cutmix")
+    >>> print(f"Model saved to: {path}")
+
+    See Also
+    --------
+    ModelDownloader : Full downloader class with more control
+    load_pretrained_model : Download and load model in one call
     """
     downloader = ModelDownloader(model_name, save_dir)
     return downloader.download_model()
@@ -209,6 +416,47 @@ def download_model_weights(model_name: str, save_dir: str = "~/.bpdneo/models") 
 def _build_model_from_config(config: Dict[str, Any]) -> torch.nn.Module:
     """
     Build model architecture from configuration, matching training setup.
+
+    This internal function constructs a BPDModel with the appropriate backbone
+    (XRV or torchvision ResNet50) based on the model configuration. It ensures
+    the architecture exactly matches the one used during training.
+
+    Parameters
+    ----------
+    config : dict
+        Model configuration dictionary containing at least:
+        - 'backbone' : str, either 'xrv' or 'torchvision'
+
+    Returns
+    -------
+    torch.nn.Module
+        BPDModel instance with appropriate backbone
+
+    Raises
+    ------
+    ValueError
+        If config['backbone'] is not 'xrv' or 'torchvision'
+
+    Notes
+    -----
+    Backbone details:
+    - 'xrv': TorchXRayVision ResNet50 pretrained on ChestX-ray14 (512x512)
+    - 'torchvision': Standard ImageNet ResNet50 (adapted for grayscale)
+
+    The BPDModel wrapper replaces the final fully-connected layer with a
+    binary classification head (single output unit).
+
+    Examples
+    --------
+    >>> config = MODEL_CONFIGS['bpd_xrv_progfreeze_lp_cutmix']
+    >>> model = _build_model_from_config(config)
+    >>> print(type(model).__name__)
+    BPDModel
+
+    See Also
+    --------
+    BPDModel : Model wrapper class
+    load_pretrained_model : Public API for loading models
     """
     import torchxrayvision as xrv
     from torchvision import models as tvm
@@ -230,15 +478,76 @@ def load_pretrained_model(
     save_dir: str = "~/.bpdneo/models",
 ) -> torch.nn.Module:
     """
-    Load a pre-trained BPD prediction model.
+    Load a pre-trained BPD prediction model ready for inference.
 
-    Args:
-        model_name: Name of the model to load
-        device: Device to load the model on (default: cuda if available, else cpu)
-        save_dir: Directory where models are saved
+    This is the main entry point for loading pretrained models. It handles
+    downloading (if needed), architecture construction, checkpoint loading,
+    and device placement. The returned model is in eval mode and ready for
+    immediate inference.
 
-    Returns:
-        Loaded PyTorch model ready for inference
+    Parameters
+    ----------
+    model_name : str
+        Name of the model to load (must be a key in MODEL_CONFIGS)
+    device : torch.device, optional
+        Device to load the model on. If None, uses CUDA if available,
+        otherwise CPU.
+    save_dir : str, default="~/.bpdneo/models"
+        Directory where models are cached (supports ~ expansion)
+
+    Returns
+    -------
+    torch.nn.Module
+        Loaded BPDModel in eval mode, moved to specified device
+
+    Raises
+    ------
+    ValueError
+        If model_name is not in MODEL_CONFIGS
+    RuntimeError
+        If checkpoint loading fails
+
+    Notes
+    -----
+    This function performs the following steps:
+    1. Auto-detect device if not specified
+    2. Download model weights if not cached
+    3. Build model architecture from config
+    4. Load checkpoint with backwards compatibility handling
+    5. Extract state dict robustly (handles multiple formats)
+    6. Load state dict with strict=True
+    7. Set model to eval mode
+    8. Print confirmation with preprocessing info
+
+    The checkpoint loading uses _load_checkpoint() which handles legacy
+    checkpoints that reference __main__.ModelConfig.
+
+    Examples
+    --------
+    >>> from bpd_ui.models.model_util import load_pretrained_model
+    >>> import torch
+    >>>
+    >>> # Load best model on CPU
+    >>> model = load_pretrained_model("bpd_xrv_progfreeze_lp_cutmix")
+    Loaded model 'bpd_xrv_progfreeze_lp_cutmix' on cpu
+    Preprocessing: xrv
+    Input size: 512x512
+    >>>
+    >>> # Load on GPU if available
+    >>> device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    >>> model = load_pretrained_model("bpd_xrv_fullft", device=device)
+    >>>
+    >>> # Inference
+    >>> model.eval()
+    >>> with torch.no_grad():
+    ...     logits = model(input_tensor)
+    ...     prob = torch.sigmoid(logits)
+
+    See Also
+    --------
+    download_model_weights : Download weights without loading
+    get_preprocessing_transforms : Get matching preprocessing
+    list_available_models : List all available models
     """
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -279,13 +588,73 @@ def load_pretrained_model(
 def get_preprocessing_transforms(model_name: str):
     """
     Get the appropriate preprocessing transforms for a model.
-    Matches the exact preprocessing used during training.
 
-    Args:
-        model_name: Name of the model
+    This function returns the exact preprocessing pipeline used during training
+    for the specified model. It is CRITICAL to use these transforms rather than
+    custom preprocessing to ensure consistent results.
 
-    Returns:
-        torchvision transforms for preprocessing
+    Parameters
+    ----------
+    model_name : str
+        Name of the model (must be a key in MODEL_CONFIGS)
+
+    Returns
+    -------
+    torchvision.transforms.Compose or callable
+        Transform function/composition that converts PIL Image to tensor.
+        For XRV models: grayscale → XRV normalize → tensor → resize(512)
+        For ImageNet models: resize(512) → RGB → tensor → ImageNet normalize
+
+    Raises
+    ------
+    ValueError
+        If config['preprocessing'] is not 'xrv' or 'imagenet'
+    KeyError
+        If model_name is not in MODEL_CONFIGS
+
+    Notes
+    -----
+    **XRV Preprocessing Pipeline**:
+    1. Convert PIL Image to grayscale numpy array
+    2. Apply xrv.datasets.normalize(arr, 255) - scales to [0, 1] range
+    3. Convert to tensor (adds channel dimension)
+    4. Resize to 512×512 with antialiasing
+
+    **ImageNet Preprocessing Pipeline**:
+    1. Resize to 512×512 with antialiasing
+    2. Convert to RGB (if not already)
+    3. Convert to tensor (scales to [0, 1])
+    4. Normalize with ImageNet statistics:
+       - mean=[0.485, 0.456, 0.406]
+       - std=[0.229, 0.224, 0.225]
+
+    **CRITICAL**: Never create custom preprocessing. Always use this function
+    to ensure consistency with training. Even minor deviations (e.g., different
+    resize interpolation) can significantly impact model performance.
+
+    Examples
+    --------
+    >>> from bpd_ui.models.model_util import get_preprocessing_transforms
+    >>> from PIL import Image
+    >>> import torch
+    >>>
+    >>> # Get transforms for best model
+    >>> transform = get_preprocessing_transforms("bpd_xrv_progfreeze_lp_cutmix")
+    >>>
+    >>> # Apply to image
+    >>> img = Image.open("xray.jpg")
+    >>> tensor = transform(img)
+    >>> print(tensor.shape)
+    torch.Size([1, 512, 512])
+    >>>
+    >>> # Batch inference
+    >>> batch = torch.stack([transform(img) for img in images])
+    >>> logits = model(batch)
+
+    See Also
+    --------
+    load_pretrained_model : Load model (use with these transforms)
+    MODEL_CONFIGS : Model configuration database
     """
     from torchvision import transforms as T
     import torchxrayvision as xrv
@@ -328,10 +697,44 @@ def get_preprocessing_transforms(model_name: str):
 
 def list_available_models() -> Dict[str, Any]:
     """
-    List all available pre-trained models with their descriptions.
+    List all available pre-trained models with their metadata.
 
-    Returns:
-        Dictionary of model names and their configurations
+    This function returns a simplified view of MODEL_CONFIGS containing only
+    the most relevant information for model selection: description, AUROC,
+    architecture, and preprocessing type.
+
+    Returns
+    -------
+    dict
+        Dictionary mapping model names to metadata dictionaries.
+        Each metadata dict contains:
+        - 'description' : str, model description
+        - 'auroc' : float, test set AUROC performance
+        - 'architecture' : str, backbone architecture (always resnet50)
+        - 'preprocessing' : str, either 'xrv' or 'imagenet'
+
+    Examples
+    --------
+    >>> from bpd_ui.models.model_util import list_available_models
+    >>>
+    >>> models = list_available_models()
+    >>> for name, info in models.items():
+    ...     print(f"{name}: AUROC {info['auroc']:.3f}")
+    bpd_xrv_progfreeze_lp_cutmix: AUROC 0.783
+    bpd_xrv_progfreeze: AUROC 0.775
+    bpd_xrv_fullft: AUROC 0.761
+    bpd_rgb_progfreeze: AUROC 0.717
+    >>>
+    >>> # Find best XRV model
+    >>> xrv_models = {k: v for k, v in models.items()
+    ...               if v['preprocessing'] == 'xrv'}
+    >>> best = max(xrv_models.items(), key=lambda x: x[1]['auroc'])
+    >>> print(f"Best XRV model: {best[0]}")
+
+    See Also
+    --------
+    MODEL_CONFIGS : Full model configuration database
+    load_pretrained_model : Load a specific model
     """
     models_info = {}
     for name, config in MODEL_CONFIGS.items():
